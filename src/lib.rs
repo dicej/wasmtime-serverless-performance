@@ -8,7 +8,7 @@ mod tests {
         super::*,
         anyhow::{anyhow, Context, Error, Result},
         http_types::{Method, Request, Response},
-        std::{fs, process::Command},
+        std::{fs, process::Command, sync::Once},
         test::Bencher,
         tokio::runtime::Runtime,
         wasmtime::{
@@ -23,17 +23,31 @@ mod tests {
         async: true
     });
 
+    fn compile_guests() {
+        static ONCE: Once = Once::new();
+
+        let once = || {
+            for guest in ["wagi-guest", "spin-guest", "spin-sdk-guest"] {
+                let mut cmd = Command::new("cargo");
+                cmd.arg("build")
+                    .current_dir(guest)
+                    .arg("--release")
+                    .arg("--target=wasm32-wasi")
+                    .env("CARGO_TARGET_DIR", env!("OUT_DIR"));
+
+                let status = cmd.status().unwrap();
+                assert!(status.success());
+            }
+
+            Ok::<(), Error>(())
+        };
+
+        ONCE.call_once(|| once().unwrap())
+    }
+
     #[bench]
     fn wagi_response(bencher: &mut Bencher) -> Result<()> {
-        let mut cmd = Command::new("cargo");
-        cmd.arg("build")
-            .current_dir("wagi-guest")
-            .arg("--release")
-            .arg("--target=wasm32-wasi")
-            .env("CARGO_TARGET_DIR", env!("OUT_DIR"));
-
-        let status = cmd.status().unwrap();
-        assert!(status.success());
+        compile_guests();
 
         let mut config = Config::new();
         config.async_support(true);
@@ -91,32 +105,16 @@ mod tests {
 
     #[bench]
     fn spin_sdk_response(bencher: &mut Bencher) -> Result<()> {
-        spin_response(
-            bencher,
-            "spin-sdk-guest",
-            "/wasm32-wasi/release/spin_sdk_guest.wasm",
-        )
+        spin_response(bencher, "/wasm32-wasi/release/spin_sdk_guest.wasm")
     }
 
     #[bench]
     fn spin_raw_response(bencher: &mut Bencher) -> Result<()> {
-        spin_response(
-            bencher,
-            "spin-guest",
-            "/wasm32-wasi/release/spin_guest.wasm",
-        )
+        spin_response(bencher, "/wasm32-wasi/release/spin_guest.wasm")
     }
 
-    fn spin_response(bencher: &mut Bencher, dir: &str, output: &str) -> Result<()> {
-        let mut cmd = Command::new("cargo");
-        cmd.arg("build")
-            .current_dir(dir)
-            .arg("--release")
-            .arg("--target=wasm32-wasi")
-            .env("CARGO_TARGET_DIR", env!("OUT_DIR"));
-
-        let status = cmd.status().unwrap();
-        assert!(status.success());
+    fn spin_response(bencher: &mut Bencher, wasm_path: &str) -> Result<()> {
+        compile_guests();
 
         let mut config = Config::new();
         config.async_support(true);
@@ -126,7 +124,10 @@ mod tests {
         wasi_host::command::add_to_linker(&mut linker, |ctx| ctx)?;
         let pre = linker.instantiate_pre(&Component::new(
             engine,
-            spin_componentize::componentize(&fs::read(&format!("{}{}", env!("OUT_DIR"), output))?)?,
+            spin_componentize::componentize(&fs::read(&format!(
+                "{}{wasm_path}",
+                env!("OUT_DIR")
+            ))?)?,
         )?)?;
 
         let run = || async {
