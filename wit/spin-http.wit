@@ -1,0 +1,3 @@
+default world spin-http {
+  export inbound-http: pkg.inbound-http
+}

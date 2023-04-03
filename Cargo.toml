@@ -1,0 +1,15 @@
+[package]
+name = "wasmtime-performance"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasi-preview1 = { package = "wasi-common", version = "7.0.0" }
+wasmtime-wasi-preview1 = { package = "wasmtime-wasi", version = "7.0.0", features = ["tokio"] }
+wasmtime = { version = "7.0.0", features = ["component-model"] }
+anyhow = "1.0.70"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+spin-componentize = { git = "https://github.com/fermyon/spin-componentize" }
+wasi-host = { package = "host", git = "https://github.com/fermyon/spin-componentize" }
+wasmtime-wasi-preview2 = { package = "wasi-cap-std-sync", git = "https://github.com/fermyon/spin-componentize" }
+wasi-preview2 = { package = "wasi-common", git = "https://github.com/fermyon/spin-componentize" }
