@@ -90,10 +90,27 @@ mod tests {
     }
 
     #[bench]
-    fn spin_response(bencher: &mut Bencher) -> Result<()> {
+    fn spin_sdk_response(bencher: &mut Bencher) -> Result<()> {
+        spin_response(
+            bencher,
+            "spin-sdk-guest",
+            "/wasm32-wasi/release/spin_sdk_guest.wasm",
+        )
+    }
+
+    #[bench]
+    fn spin_raw_response(bencher: &mut Bencher) -> Result<()> {
+        spin_response(
+            bencher,
+            "spin-guest",
+            "/wasm32-wasi/release/spin_guest.wasm",
+        )
+    }
+
+    fn spin_response(bencher: &mut Bencher, dir: &str, output: &str) -> Result<()> {
         let mut cmd = Command::new("cargo");
         cmd.arg("build")
-            .current_dir("spin-guest")
+            .current_dir(dir)
             .arg("--release")
             .arg("--target=wasm32-wasi")
             .env("CARGO_TARGET_DIR", env!("OUT_DIR"));
@@ -109,10 +126,7 @@ mod tests {
         wasi_host::command::add_to_linker(&mut linker, |ctx| ctx)?;
         let pre = linker.instantiate_pre(&Component::new(
             engine,
-            spin_componentize::componentize(&fs::read(concat!(
-                env!("OUT_DIR"),
-                "/wasm32-wasi/release/spin_guest.wasm"
-            ))?)?,
+            spin_componentize::componentize(&fs::read(&format!("{}{}", env!("OUT_DIR"), output))?)?,
         )?)?;
 
         let run = || async {
