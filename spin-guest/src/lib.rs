@@ -1,14 +1,14 @@
-use http_types::{Request, Response};
+pub use http_types::{Method, RequestResult, Response};
 
 wit_bindgen::generate!({
     world: "spin-http",
     path: "../wit"
 });
 
-struct InboundHttp;
+pub struct InboundHttp;
 
 impl inbound_http::InboundHttp for InboundHttp {
-    fn handle_request(req: Request) -> Response {
+    fn handle_request(req: RequestResult) -> Response {
         assert_eq!("/foo?a=b", &req.uri);
         assert_eq!(
             &[("what".to_owned(), "up".to_owned())] as &[_],

@@ -1,3 +1,9 @@
 default world spin-http {
+  import config: pkg.config
+  import postgres: pkg.postgres
+  import mysql: pkg.mysql
+  import redis: pkg.redis
+  import key-value: pkg.key-value
+  import http: pkg.http
   export inbound-http: pkg.inbound-http
 }
