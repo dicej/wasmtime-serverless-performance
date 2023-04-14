@@ -25,7 +25,10 @@ mod tests {
         test::Bencher,
         tokio::runtime::Runtime,
         wasmtime::{
-            component::{Component, Instance as ComponentInstance, Linker as ComponentLinker},
+            component::{
+                Component, Instance as ComponentInstance, InstancePre as ComponentInstancePre,
+                Linker as ComponentLinker, TypedFunc as ComponentTypedFunc,
+            },
             Config, Engine, InstanceAllocationStrategy, Linker as ModuleLinker, Module,
             PoolingAllocationConfig, Store,
         },
@@ -351,19 +354,13 @@ mod tests {
         Ok(())
     }
 
-    async fn spin_test_instance(
+    async fn spin_test_func(
         store: &mut Store<Host>,
-        instance: ComponentInstance,
+        func: ComponentTypedFunc<(RequestParam<'_>,), (Response,)>,
     ) -> Result<()> {
-        let func = instance
-            .exports(&mut *store)
-            .instance("inbound-http")
-            .ok_or_else(|| anyhow!("no inbound-http instance found"))?
-            .typed_func::<(RequestParam,), (Response,)>("handle-request")?;
-
         let (response,) = func
             .call_async(
-                store,
+                &mut *store,
                 (RequestParam {
                     method: Method::Post,
                     uri: "/foo?a=b",
@@ -374,36 +371,56 @@ mod tests {
             )
             .await?;
 
-        eprintln!(
-            "got response: {response:?} ({:?})",
-            response.body.as_deref().map(|v| String::from_utf8_lossy(v))
-        );
-
         let headers = response.headers.unwrap();
         assert_eq!(1, headers.len());
         assert_eq!("content-type", headers[0].0);
         assert_eq!("text/plain", headers[0].1);
         assert_eq!(Some(b"hola, mundo!" as &[_]), response.body.as_deref());
 
-        Ok(())
+        func.post_return_async(store).await
     }
 
-    fn spin_response(bencher: &mut Bencher, wasm_path: &str, mut config: Config) -> Result<()> {
-        compile_guests();
+    async fn spin_test_instance(
+        store: &mut Store<Host>,
+        instance: &ComponentInstance,
+    ) -> Result<()> {
+        let func = instance
+            .exports(&mut *store)
+            .instance("inbound-http")
+            .ok_or_else(|| anyhow!("no inbound-http instance found"))?
+            .typed_func::<(RequestParam,), (Response,)>("handle-request")?;
+        spin_test_func(store, func).await
+    }
 
+    fn spin_instance_pre(
+        wasm_path: &str,
+        mut config: Config,
+    ) -> Result<(ComponentInstancePre<Host>, Engine)> {
         config.async_support(true);
         config.wasm_component_model(true);
-        let engine = &Engine::new(&config)?;
-        let mut linker = ComponentLinker::new(engine);
+        let engine = Engine::new(&config)?;
+        let mut linker = ComponentLinker::new(&engine);
         add_to_linker(&mut linker)?;
-        let pre = linker.instantiate_pre(&Component::new(
+        Ok((
+            linker.instantiate_pre(&Component::new(
+                &engine,
+                spin_componentize::componentize(&fs::read(format!(
+                    "{}{wasm_path}",
+                    env!("OUT_DIR")
+                ))?)?,
+            )?)?,
             engine,
-            spin_componentize::componentize(&fs::read(format!("{}{wasm_path}", env!("OUT_DIR")))?)?,
-        )?)?;
+        ))
+    }
+
+    fn spin_response(bencher: &mut Bencher, wasm_path: &str, config: Config) -> Result<()> {
+        compile_guests();
+
+        let (pre, engine) = spin_instance_pre(wasm_path, config)?;
 
         let run = || async {
             let mut store = Store::new(
-                engine,
+                &engine,
                 Host {
                     wasi: wasmtime_wasi_preview2::WasiCtxBuilder::new()
                         .inherit_stdout()
@@ -413,7 +430,7 @@ mod tests {
             );
             let instance = pre.instantiate_async(&mut store).await?;
 
-            spin_test_instance(&mut store, instance).await
+            spin_test_instance(&mut store, &instance).await
         };
 
         let runtime = Runtime::new()?;
@@ -434,7 +451,7 @@ mod tests {
     }
 
     #[bench]
-    fn wagi_response(bencher: &mut Bencher) -> Result<()> {
+    fn wagi_response_pre_instance(bencher: &mut Bencher) -> Result<()> {
         compile_guests();
 
         let mut config = Config::new();
@@ -492,7 +509,7 @@ mod tests {
     }
 
     #[bench]
-    fn spin_sdk_response(bencher: &mut Bencher) -> Result<()> {
+    fn spin_rust_sdk_response_pre_instance(bencher: &mut Bencher) -> Result<()> {
         spin_response(
             bencher,
             "/wasm32-wasi/release/spin_sdk_guest.wasm",
@@ -501,16 +518,12 @@ mod tests {
     }
 
     #[bench]
-    fn spin_python_response(bencher: &mut Bencher) -> Result<()> {
-        let mut config = Config::new();
-        config.allocation_strategy(InstanceAllocationStrategy::Pooling(
-            PoolingAllocationConfig::default(),
-        ));
-        spin_response(bencher, "/python-spin-guest.wasm", config)
+    fn spin_python_response_pre_instance(bencher: &mut Bencher) -> Result<()> {
+        spin_response(bencher, "/python-spin-guest.wasm", Config::new())
     }
 
     #[bench]
-    fn spin_raw_response(bencher: &mut Bencher) -> Result<()> {
+    fn spin_rust_response_pre_instance(bencher: &mut Bencher) -> Result<()> {
         spin_response(
             bencher,
             "/wasm32-wasi/release/spin_guest.wasm",
@@ -519,7 +532,38 @@ mod tests {
     }
 
     #[bench]
-    fn spin_raw_response_with_pooling(bencher: &mut Bencher) -> Result<()> {
+    fn spin_rust_response_reuse_instance(bencher: &mut Bencher) -> Result<()> {
+        compile_guests();
+
+        let (pre, engine) =
+            spin_instance_pre("/wasm32-wasi/release/spin_guest.wasm", Config::new())?;
+
+        let mut store = Store::new(
+            &engine,
+            Host {
+                wasi: wasmtime_wasi_preview2::WasiCtxBuilder::new()
+                    .inherit_stdout()
+                    .inherit_stderr()
+                    .build(),
+            },
+        );
+
+        let runtime = Runtime::new()?;
+
+        let instance = runtime.block_on(pre.instantiate_async(&mut store))?;
+        let func = instance
+            .exports(&mut store)
+            .instance("inbound-http")
+            .ok_or_else(|| anyhow!("no inbound-http instance found"))?
+            .typed_func::<(RequestParam,), (Response,)>("handle-request")?;
+
+        bencher.iter(|| runtime.block_on(spin_test_func(&mut store, func)).unwrap());
+
+        Ok(())
+    }
+
+    #[bench]
+    fn spin_rust_response_pre_instance_with_pooling(bencher: &mut Bencher) -> Result<()> {
         let mut config = Config::new();
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(
             PoolingAllocationConfig::default(),
@@ -528,7 +572,7 @@ mod tests {
     }
 
     #[bench]
-    fn spin_raw_response_no_pre_instantiation(bencher: &mut Bencher) -> Result<()> {
+    fn spin_rust_response(bencher: &mut Bencher) -> Result<()> {
         compile_guests();
 
         let mut config = Config::new();
@@ -553,7 +597,7 @@ mod tests {
                 .instantiate_async(&mut store, &Component::new(engine, &component)?)
                 .await?;
 
-            spin_test_instance(&mut store, instance).await
+            spin_test_instance(&mut store, &instance).await
         };
 
         let runtime = Runtime::new()?;
@@ -564,7 +608,7 @@ mod tests {
     }
 
     #[bench]
-    fn spin_raw_response_pre_compile(bencher: &mut Bencher) -> Result<()> {
+    fn spin_rust_response_pre_compile(bencher: &mut Bencher) -> Result<()> {
         compile_guests();
 
         let mut config = Config::new();
@@ -578,6 +622,9 @@ mod tests {
             env!("OUT_DIR")
         ))?)?;
         let cwasm = engine.precompile_component(&component)?;
+        let tempdir = tempfile::tempdir()?;
+        let file = tempdir.path().join("foo.cwasm");
+        fs::write(&file, &cwasm)?;
 
         let run = || async {
             let mut store = Store::new(
@@ -588,11 +635,11 @@ mod tests {
             );
             let instance = linker
                 .instantiate_async(&mut store, &unsafe {
-                    Component::deserialize(engine, &cwasm)
+                    Component::deserialize_file(engine, &file)
                 }?)
                 .await?;
 
-            spin_test_instance(&mut store, instance).await
+            spin_test_instance(&mut store, &instance).await
         };
 
         let runtime = Runtime::new()?;
